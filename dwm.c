@@ -55,6 +55,7 @@
 #define WIDTH(X)                ((X)->w + 2 * (X)->bw)
 #define HEIGHT(X)               ((X)->h + 2 * (X)->bw)
 #define TAGMASK                 ((1 << LENGTH(tags)) - 1)
+#define SPTAG                   (1u << LENGTH(tags))
 #define TEXTW(X)                (drw_fontset_getwidth(drw, (X)) + lrpad)
 
 #define SYSTEM_TRAY_REQUEST_DOCK    0
@@ -236,6 +237,7 @@ static void tagmon(const Arg *arg);
 static void tile(Monitor *m);
 static void togglebar(const Arg *arg);
 static void togglefloating(const Arg *arg);
+static void togglescratch(const Arg *arg);
 static void toggletag(const Arg *arg);
 static void toggleview(const Arg *arg);
 static void unfocus(Client *c, int setfocus);
@@ -339,7 +341,7 @@ applyrules(Client *c)
 		XFree(ch.res_class);
 	if (ch.res_name)
 		XFree(ch.res_name);
-	c->tags = c->tags & TAGMASK ? c->tags & TAGMASK : c->mon->tagset[c->mon->seltags];
+	c->tags = c->tags & (TAGMASK | SPTAG) ? c->tags & (TAGMASK | SPTAG) : c->mon->tagset[c->mon->seltags];
 }
 
 int
@@ -696,6 +698,10 @@ configurerequest(XEvent *e)
 			if (ev->value_mask & CWHeight) {
 				c->oldh = c->h;
 				c->h = ev->height;
+			}
+			if (c->tags & SPTAG) {
+				c->x = m->wx;
+				c->w = m->ww - 2 * c->bw;
 			}
 			if ((c->x + c->w) > m->mx + m->mw && c->isfloating)
 				c->x = m->mx + (m->mw / 2 - WIDTH(c) / 2); /* center in x direction */
@@ -1600,7 +1606,7 @@ sendmon(Client *c, Monitor *m)
 	detach(c);
 	detachstack(c);
 	c->mon = m;
-	c->tags = m->tagset[m->seltags]; /* assign tags of target monitor */
+	c->tags = c->tags & SPTAG ? SPTAG : m->tagset[m->seltags];
 	attach(c);
 	attachstack(c);
 	if (c->isfullscreen)
@@ -1828,7 +1834,9 @@ showhide(Client *c)
 	if (ISVISIBLE(c)) {
 		/* show clients top down */
 		XMoveWindow(dpy, c->win, c->x, c->y);
-		if ((!c->mon->lt[c->mon->sellt]->arrange || c->isfloating) && !c->isfullscreen)
+		if ((c->tags & SPTAG) && !c->isfullscreen)
+			resizeclient(c, c->mon->wx, c->mon->wy, c->mon->ww - 2 * c->bw, c->h);
+		else if ((!c->mon->lt[c->mon->sellt]->arrange || c->isfloating) && !c->isfullscreen)
 			resize(c, c->x, c->y, c->w, c->h, 0);
 		showhide(c->snext);
 	} else {
@@ -1869,7 +1877,7 @@ spawn(const Arg *arg)
 void
 tag(const Arg *arg)
 {
-	if (selmon->sel && arg->ui & TAGMASK) {
+	if (selmon->sel && !(selmon->sel->tags & SPTAG) && arg->ui & TAGMASK) {
 		selmon->sel->tags = arg->ui & TAGMASK;
 		focus(NULL);
 		arrange(selmon);
@@ -1947,11 +1955,43 @@ togglefloating(const Arg *arg)
 }
 
 void
+togglescratch(const Arg *arg)
+{
+	Client *c;
+	Monitor *m;
+
+	for (m = mons; m; m = m->next)
+		for (c = m->clients; c; c = c->next)
+			if (c->tags & SPTAG)
+				goto found;
+
+	selmon->tagset[selmon->seltags] |= SPTAG;
+	spawn(arg);
+	arrange(selmon);
+	return;
+
+found:
+	if (ISVISIBLE(c)) {
+		c->mon->tagset[c->mon->seltags] &= ~SPTAG;
+		focus(NULL);
+		arrange(c->mon);
+		return;
+	}
+	if (c->mon != selmon) {
+		sendmon(c, selmon);
+		c->tags = SPTAG;
+	}
+	selmon->tagset[selmon->seltags] |= SPTAG;
+	focus(c);
+	arrange(selmon);
+}
+
+void
 toggletag(const Arg *arg)
 {
 	unsigned int newtags;
 
-	if (!selmon->sel)
+	if (!selmon->sel || selmon->sel->tags & SPTAG)
 		return;
 	newtags = selmon->sel->tags ^ (arg->ui & TAGMASK);
 	if (newtags) {
@@ -1966,7 +2006,7 @@ toggleview(const Arg *arg)
 {
 	unsigned int newtagset = selmon->tagset[selmon->seltags] ^ (arg->ui & TAGMASK);
 
-	if (newtagset) {
+	if (newtagset & TAGMASK) {
 		selmon->tagset[selmon->seltags] = newtagset;
 		focus(NULL);
 		arrange(selmon);
@@ -2396,11 +2436,19 @@ updatewmhints(Client *c)
 void
 view(const Arg *arg)
 {
-	if ((arg->ui & TAGMASK) == selmon->tagset[selmon->seltags])
+	if ((arg->ui & TAGMASK) == (selmon->tagset[selmon->seltags] & TAGMASK)) {
+		if (selmon->tagset[selmon->seltags] & SPTAG) {
+			selmon->tagset[selmon->seltags] &= ~SPTAG;
+			focus(NULL);
+			arrange(selmon);
+		}
 		return;
+	}
 	selmon->seltags ^= 1; /* toggle sel tagset */
 	if (arg->ui & TAGMASK)
 		selmon->tagset[selmon->seltags] = arg->ui & TAGMASK;
+	else
+		selmon->tagset[selmon->seltags] &= ~SPTAG;
 	focus(NULL);
 	arrange(selmon);
 }
